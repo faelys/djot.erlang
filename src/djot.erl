@@ -20,7 +20,7 @@
 % SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 -module(djot).
--export([parse/1, parse/2, walk_ast/4, update_ast/4]).
+-export([parse/1, start_state/0, parse/2, walk_ast/4, update_ast/4]).
 
 -include_lib("stdlib/include/assert.hrl").
 
@@ -41,7 +41,7 @@
                      orelse Element =:= fenced_div
                      orelse Element =:= footnote
                      orelse Element =:= heading
-                     orelse Element =:= link_reference
+                     orelse Element =:= reference_definition
                      orelse Element =:= list
                      orelse Element =:= list_item
                      orelse Element =:= para
@@ -61,7 +61,7 @@
                             orelse Element =:= para)).
 
 -define(CONTAINS_TEXT(Element), (Element =:= code_block
-                          orelse Element =:= link_reference
+                          orelse Element =:= reference_definition
                           orelse Element =:= reference)).
 
 % CONTAINS_OTHER: table, thematic_break
@@ -238,6 +238,25 @@ maybe_close_fence([Mark | Tail], Mark, Needed, Orig_Input, Stack) ->
 maybe_close_fence(_, _, _, Orig_Input, Stack) ->
   parse(Orig_Input, Stack).
 
+continue_reference_definition([10 | Tail], Text, _, _, _,
+                              {reference_definition, Attributes, Target},
+                              Stack) ->
+  parse(Tail,
+        [{newline, []},
+         {reference_definition, Attributes, Text ++ Target}
+         | Stack]);
+continue_reference_definition([Head | _], _, Input, Indent_Level, Attributes,
+                              Block, Stack)
+  when ?SPACE(Head) ->
+  close_blocks(Input,
+               [{prefix, Indent_Level, Attributes, []}],
+               Stack,
+               [Block]);
+continue_reference_definition([Head | Tail], Seen, Input, Ident_Level,
+                              Attributes, Block, Stack) ->
+  continue_reference_definition(Tail, [Head | Seen], Input, Ident_Level,
+                                Attributes, Block, Stack).
+
 
 
 push_text([{text, Value} | Stack], Text) ->
@@ -381,11 +400,13 @@ parse(Input,
 % link reference continuation
 parse(Input,
       [{prefix, Indent_Level, Attributes,
-         [Block = {link_reference, [{indent, Block_Level} | _], _} | To_Match]}
+         [Block = {reference_definition, [{indent, Block_Level} | _], _}
+          | To_Match]}
        | Stack])
   when Indent_Level > Block_Level ->
-  parse(Input,
-        [{prefix, Indent_Level, Attributes, To_Match}, Block | Stack]);
+  ?assertEqual(To_Match, []),
+  continue_reference_definition(Input, [], Input,
+                                Indent_Level, Attributes, Block, Stack);
 
 % list continuation
 parse(Input,
@@ -566,6 +587,48 @@ parse(_,
        | Stack]) ->
   parse(Backtrack, [{para, Attributes, []} | Stack]);
 
+% footnote definition
+parse(Input = "[^" ++ Tail, [{newblock, Level, Attributes} | Stack]) ->
+  parse(Tail, [{footnote,
+                [],
+                Level,
+                [{indent, Level} | Attributes],
+                {Input, [{para, Attributes, []} | Stack]}}
+               | Stack]);
+parse("]:" ++ (Tail = [Space | _]),
+      [{footnote, Name, Level, Attributes, {_, _}} | Stack])
+  when ?SPACE(Space) ->
+  parse(Tail,
+        [{footnote, Name, Level + 2, Attributes, done} | Stack]);
+parse([Space | Tail], [{footnote, Name, Level, Attributes, done} | Stack])
+  when Space =:= 32 orelse Space =:= 9 ->
+  parse(Tail, [{footnote, Name, Level + 1, Attributes, done} | Stack]);
+parse([10 | Tail],
+      [{footnote, Name, _, [{indent, Level} | Attributes], done} | Stack]) ->
+  parse(Tail, [{newline, []},
+               {footnote,
+                [{indent, Level},
+                 {"reference", lists:reverse(Name)}
+                 | Attributes],
+                []}
+               | Stack]);
+parse(Input,
+      [{footnote, Name, Next_Level,[{indent, Level} | Attributes], done}
+       | Stack]) ->
+  parse(Input, [{newblock, Next_Level, []},
+                {footnote, [{indent, Level},
+                            {"reference", lists:reverse(Name)}
+                            | Attributes], []}
+                | Stack]);
+parse([Head | _],
+      [{footnote, _, _, _, {Input, Stack}} | _])
+  when Head =:= 10 orelse Head =:= 13 orelse Head =:= $] ->
+  parse(Input, Stack);
+parse([Head | Tail],
+      [{footnote, Name, Level, Attributes, Fallback} | Stack]) ->
+  parse(Tail,
+        [{footnote, [Head | Name], Level + 1, Attributes, Fallback} | Stack]);
+
 % heading
 parse(Input = [$# | Tail], [{newblock, _, Attributes} | Stack]) ->
   parse(Tail, [{heading, 1, Attributes, Input} | Stack]);
@@ -579,6 +642,56 @@ parse([10 | Tail], [{heading, Level, Attributes, _} | Stack]) ->
         [{newline, []}, {heading, [{level, Level} | Attributes], []} | Stack]);
 parse(_, [{heading, _, Attributes, Backtrack} | Stack]) ->
   parse(Backtrack, [{para, Attributes, []} | Stack]);
+
+% link reference definition
+parse(Input = "[" ++ Tail, [{newblock, Level, Attributes} | Stack]) ->
+  parse(Tail, [{reference_definition,
+                [],
+                [{indent, Level} | Attributes],
+                {Input, [{para, Attributes, []} | Stack]}}
+               | Stack]);
+parse("]:" ++ [Space | Tail],
+      [{reference_definition, Name, Attributes, Fallback} | Stack])
+  when Space =:= 32 orelse Space =:= 9 ->
+  parse(Tail,
+        [{reference_definition, Name, [], Attributes, Fallback} | Stack]);
+parse("]:" ++ [10 | Tail],
+      [{reference_definition, Name, [{indent, Level} | Attr], _} | Stack]) ->
+  parse(Tail, [{newline, []},
+               {reference_definition,
+                [{indent, Level},
+                 {"reference", lists:reverse(Name)}
+                 | Attr],
+                []}
+               | Stack]);
+parse([Head | _],
+      [{reference_definition, _, _, {Input, Stack}} | _])
+  when Head =:= 10 orelse Head =:= 13 orelse Head =:= $] ->
+  parse(Input, Stack);
+parse([Head | Tail],
+      [{reference_definition, Name, Attributes, Fallback} | Stack]) ->
+  parse(Tail,
+        [{reference_definition, [Head | Name], Attributes, Fallback} | Stack]);
+parse([Head | Tail],
+      Stack = [{reference_definition, _, [], _, _} | _])
+  when Head =:= 32 orelse Head =:= 9 ->
+  parse(Tail, Stack);
+parse([10 | Tail],
+      [{reference_definition, Name, Contents, [{indent, Level} | Attr], _}
+       | Stack]) ->
+  parse(Tail, [{newline, []},
+               {reference_definition,
+                [{indent, Level},
+                 {"reference", lists:reverse(Name)}
+                 | Attr],
+                Contents}
+               | Stack]);
+parse([Head | Tail],
+      [{reference_definition, Name, Contents, Attributes, Backtrack}
+       | Stack]) ->
+  parse(Tail,
+        [{reference_definition, Name, [Head | Contents], Attributes, Backtrack}
+         | Stack]);
 
 % list item
 parse([Marker | Tail = [Space | _]],
@@ -816,6 +929,17 @@ parse([10 | Tail], [{code_block, Attributes, Contents} | Stack]) ->
 parse([Head | Tail], [{code_block, Attributes, Contents} | Stack]) ->
   parse(Tail, [{code_block, Attributes, [Head | Contents]} | Stack]);
 
+% link attribute post-processing
+
+parse(Input, ?INLINE_TOP({ref, Data = {_, _, _}})) ->
+  parse(Input, ?INLINE_TOP({ref, [], Data}));
+
+parse(Input, ?INLINE_TOP({ref, Attributes, {Element, Text, Contents}})) ->
+  parse(Input,
+        ?INLINE_TOP({link,
+                     [{Element, lists:reverse(Text)} | Attributes],
+                     Contents}));
+
 %% end of line
 
 parse(Input = [10 | _], ?INLINE_TOP({verbatim, N, " `" ++ Text, N})) ->
@@ -835,10 +959,15 @@ parse([10 | Tail], ?INLINE_STACK(Stack)) ->
 
 % continuations after line break
 
-parse(Input = [_|_], ?INLINE_TOP({soft_break}, {verbatim, N, opener, 0})) ->
+parse(Input, ?INLINE_TOP({soft_break}, {verbatim, N, opener, 0})) ->
   parse(Input, ?INLINE_TOP({verbatim, N, [10], 0}));
-parse(Input = [_|_], ?INLINE_TOP({soft_break}, {verbatim, N, Text, 0})) ->
+parse(Input, ?INLINE_TOP({soft_break}, {verbatim, N, Text, 0})) ->
   parse(Input, ?INLINE_TOP({verbatim, N, [10 | Text], 0}));
+parse(Input, ?INLINE_TOP({soft_break}, Top = {ref, $), _, _, _, _})) ->
+  parse(Input, ?INLINE_TOP(Top));
+parse(Input, ?INLINE_TOP({soft_break},
+                         {ref, $], Text, Element, Contents, Input})) ->
+  parse(Input, ?INLINE_TOP({ref, $], [32 | Text], Element, Contents, Input}));
 
 % escape
 parse([$\\ | [Head | Tail]], ?INLINE_STACK(Stack)) when ?PUNCTUATION(Head) ->
@@ -862,29 +991,17 @@ parse("\\ " ++ Tail, ?INLINE_STACK(Stack)) ->
             ?INLINE_STACK([{hard_break} | trim_top_spaces(Stack)]))
   end;
 
-% references TODO
-parse(Input = "[" ++ Tail, [{brackets, Contents} | Stack]) ->
-  parse(Tail, [{ref, $], "", link_ref, Contents, Input} | Stack]);
-parse(Input = "(" ++ Tail, [{brackets, Contents} | Stack]) ->
-  parse(Tail, [{ref, $), "", link, Contents, Input} | Stack]);
-parse([Head | Tail], [{ref, Head, Text, Element, Contents, _} | Stack]) ->
-  parse(Tail, [{ref, attributes, {Element, Text, Contents}} | Stack]);
-parse([Head | Tail], [{ref, Mark, Text, Element, Contents, Input} | Stack]) ->
+% references
+parse(Input = "[" ++ Tail, ?INLINE_TOP({brackets, Contents})) ->
+  parse(Tail, ?INLINE_TOP({ref, $], "", "reference", Contents, Input}));
+parse(Input = "(" ++ Tail, ?INLINE_TOP({brackets, Contents})) ->
+  parse(Tail, ?INLINE_TOP({ref, $), "", "target", Contents, Input}));
+parse([Head | Tail], ?INLINE_TOP({ref, Head, Text, Element, Contents, _})) ->
+  parse(Tail, ?INLINE_TOP({ref, attributes, {Element, Text, Contents}}));
+parse([Head | Tail],
+      ?INLINE_TOP({ref, Mark, Text, Element, Contents, Input})) ->
   parse(Tail,
-        [{ref, Mark, [Head | Text], Element, Contents, Input} | Stack]);
-
-parse(Input, [{ref, Data} | Stack]) -> parse(Input, [{ref, [], Data} | Stack]);
-
-parse(Input, [{ref, Attributes, {link_ref, Text, Contents}} | Stack]) ->
-  parse(Input, [{link,
-                 [{"reference", lists:reverse(Text)} | Attributes],
-                 Contents}
-                | Stack]);
-parse(Input, [{ref, Attributes, {link, Text, Contents}} | Stack]) ->
-  parse(Input, [{link,
-                 [{"target", lists:reverse(Text)} | Attributes],
-                 Contents}
-                | Stack]);
+        ?INLINE_TOP({ref, Mark, [Head | Text], Element, Contents, Input}));
 
 % verbatim span
 parse("`" ++ Tail, ?INLINE_TOP({verbatim, N, opener, 0})) ->
@@ -958,31 +1075,39 @@ parse([Mark | Tail], ?INLINE_STACK(Stack))
                 [Mark], span_element(Mark), ?INLINE_STACK([]));
 
 % bracketed expressions
-parse("![" ++ Tail, Stack) ->
-  parse(Tail, [{opener, "["}, {opener, "!"} | Stack]);
-parse("[" ++ Tail, Stack) -> parse(Tail, [{opener, "["} | Stack]);
-parse("]{" ++ Tail, Stack) -> close("{" ++ Tail, Stack, [], "[", span, "]", []);
-parse("](" ++ Tail, Stack) -> close("(" ++ Tail, Stack, [], "[", brackets, "]", []);
-parse("][" ++ Tail, Stack) -> close("[" ++ Tail, Stack, [], "[", brackets, "]", []);
+parse("![" ++ Tail, ?INLINE_STACK(Stack)) ->
+  parse(Tail, ?INLINE_STACK([{opener, "["}, {opener, "!"} | Stack]));
+parse("[" ++ Tail, ?INLINE_STACK(Stack)) ->
+  parse(Tail, ?INLINE_STACK([{opener, "["} | Stack]));
+parse("]{" ++ Tail, ?INLINE_STACK(Stack)) ->
+  close("{" ++ Tail, Stack, [], "[", span, "]", ?INLINE_STACK([]));
+parse("](" ++ Tail, ?INLINE_STACK(Stack)) ->
+  close("(" ++ Tail, Stack, [], "[", brackets, "]", ?INLINE_STACK([]));
+parse("][" ++ Tail, ?INLINE_STACK(Stack)) ->
+  close("[" ++ Tail, Stack, [], "[", brackets, "]", ?INLINE_STACK([]));
 
 parse([Head | Tail], ?INLINE_STACK(Stack)) ->
   parse(Tail, ?INLINE_STACK(push_char(Stack, Head))).
 
 parse(Input) ->
-  post_process(finish_doc(parse(Input, [{newline, []}, {doc, [], []}]))).
+  post_process(finish_doc(parse(Input, start_state()))).
+
+start_state() -> [{newline, []}, {doc, [], []}].
 
 % AST post-processing
 
-post_process({doc, Attributes, Contents}) ->
-  Middle = {doc, Attributes, post_process_contents(Contents, [{0, [], []}])},
-  {Doc, _} = update_node(Middle, 0, fun node_pre/2, fun node_post/2),
-  Doc.
+post_process(Doc_1) ->
+  State_0 = {#{}, []},
+  {Doc_2, _State_1} = update_node(Doc_1, State_0,
+                                  fun pre_gather_id/2, fun nop/2),
+  add_sections(Doc_2).
 
-node_pre(Node = {section, _, _}, 0) -> {Node, 1};
-node_pre(Node = {heading, _, _}, 0) -> {add_heading_id(Node), 0};
-node_pre(Node, _) -> {Node, 0}.
+pre_gather_id(Node = {heading, _, _}, State) -> add_heading_id(Node, State);
+pre_gather_id(Node = {_, Attributes, _}, State) ->
+  {Node, record_attr_id(Attributes, State)};
+pre_gather_id(Node, State) -> {Node, State}.
 
-node_post(Node, _) -> {Node, 0}.
+nop(Node, State) -> {Node, State}.
 
 
 finish_doc([{terminated}, {doc, Attributes, Contents}]) ->
@@ -1017,9 +1142,35 @@ content_id([{_, Contents} | Tail], [], Acc) ->
 content_id([{_, _, Contents} | Tail], [], Acc) ->
   content_id(Contents ++ Tail, [], Acc).
 
+unique_id([], State) -> unique_id("s", 1, State);
+unique_id(Key, State = {Id_Map, _}) ->
+  case maps:is_key(Key, Id_Map) of
+    false -> {Key, record_id(Key, State)};
+    true -> unique_id(Key, 1, State)
+  end.
+unique_id(Base, N, State = {Id_Map, _}) ->
+  Key = lists:flatten(io_lib:format("~s-~p", [Base, N])),
+  case maps:is_key(Key, Id_Map) of
+     false -> {Key, record_id(Key, State)};
+     true -> unique_id(Base, N + 1, State)
+  end.
+
+record_id(Id, {Id_Map, Warnings}) ->
+  New_Warnings = case maps:is_key(Id, Id_Map) of
+    true -> ["Duplicate id \"" ++ Id ++ "\"" | Warnings];
+    false -> Warnings
+  end,
+  {maps:put(Id, '', Id_Map), New_Warnings}.
+
+record_attr_id([], State) -> State;
+record_attr_id([{"identifier", Id} | Tail], State) ->
+  record_attr_id(Tail, record_id(Id, State));
+record_attr_id([_ | Tail], State) ->
+  record_attr_id(Tail, State).
+
 extract_heading_id(Node = {heading, [{level, _} | Attributes], _}) ->
   extract_heading_id(Attributes, [], Node).
-extract_heading_id([], _, Node) -> {content_id([Node], [], []), Node};
+%extract_heading_id([], _, Node) -> {content_id([Node], [], []), Node};
 extract_heading_id([{"identifier", Id} | Tail],
                    Seen,
                    {heading, [{level, Level} | _], Contents}) ->
@@ -1027,41 +1178,46 @@ extract_heading_id([{"identifier", Id} | Tail],
 extract_heading_id([Head | Tail], Seen, Node) ->
   extract_heading_id(Tail, [Head | Seen], Node).
 
-add_heading_id(Node = {heading, [{level, _} | Attributes], _}) ->
-  add_heading_id(Attributes, Node).
-add_heading_id([], Node = {heading, [{level, Level} | Attributes], Contents}) ->
-  {heading,
-   [{level, Level}, {"identifier", content_id([Node], [], [])} | Attributes],
-   Contents};
-add_heading_id([{"identifier", _} | _], Node) -> Node;
-add_heading_id([_ | Tail], Node) -> add_heading_id(Tail, Node).
+add_heading_id(Node = {heading, [{level, _} | Attributes], _}, State) ->
+  add_heading_id(Attributes, Node, State).
+add_heading_id([],
+               Node = {heading, [{level, Level} | Attributes], Contents},
+               State) ->
+  {Id, New_State} = unique_id(content_id([Node], [], []), State),
+  {{heading, [{level, Level}, {"identifier", Id} | Attributes], Contents},
+   New_State};
+add_heading_id([{"identifier", Id} | _], Node, State) ->
+  {Node, record_id(Id, State)};
+add_heading_id([_ | Tail], Node, State) -> add_heading_id(Tail, Node, State).
 
-post_process_contents([], [{0, [], Acc}]) -> lists:reverse(Acc);
-post_process_contents([], [{Top_Level, Top_Id, Top_Contents},
-                           {Next_Level, Next_Id, Next_Contents}
-                           | Acc]) ->
-  post_process_contents([],
-                        [{Next_Level, Next_Id,
-                          [{section,
-                            [{level, Top_Level}, {"identifier", Top_Id}],
-                            lists:reverse(Top_Contents)} | Next_Contents]}
-                         | Acc]);
-post_process_contents([Top = {heading, [{level, New_Level} | _], _} | Tail],
-                      Acc = [{Cur_Level, _, _} | _])
+add_sections({doc, Attributes, Contents}) ->
+  {doc, Attributes, add_sections(Contents, [{0, [], []}])}.
+add_sections([], [{0, [], Acc}]) -> lists:reverse(Acc);
+add_sections([], [{Top_Level, Top_Id, Top_Contents},
+                  {Next_Level, Next_Id, Next_Contents}
+                  | Acc]) ->
+  add_sections([],
+               [{Next_Level, Next_Id,
+                 [{section,
+                   [{level, Top_Level}, {"identifier", Top_Id}],
+                   lists:reverse(Top_Contents)} | Next_Contents]}
+                | Acc]);
+add_sections([Top = {heading, [{level, New_Level} | _], _} | Tail],
+             Acc = [{Cur_Level, _, _} | _])
   when New_Level > Cur_Level ->
   {Id, Updated_Top} = extract_heading_id(Top),
-  post_process_contents(Tail, [{New_Level, Id, [Updated_Top]} | Acc]);
-post_process_contents(Stack = [{heading, [{level, _} | _], _} | _],
-                      [{Top_Level, Top_Id, Top_Contents},
-                       {Next_Level, Next_Id, Next_Contents} | Acc]) ->
-  post_process_contents(Stack,
-                        [{Next_Level, Next_Id,
-                          [{section,
-                            [{level, Top_Level}, {"identifier", Top_Id}],
-                            lists:reverse(Top_Contents)} | Next_Contents]}
-                         | Acc]);
-post_process_contents([Head | Tail], [{Level, Id, Contents} | Acc]) ->
-  post_process_contents(Tail, [{Level, Id, [Head | Contents]} | Acc]).
+  add_sections(Tail, [{New_Level, Id, [Updated_Top]} | Acc]);
+add_sections(Stack = [{heading, [{level, _} | _], _} | _],
+             [{Top_Level, Top_Id, Top_Contents},
+              {Next_Level, Next_Id, Next_Contents} | Acc]) ->
+  add_sections(Stack,
+               [{Next_Level, Next_Id,
+                 [{section,
+                   [{level, Top_Level}, {"identifier", Top_Id}],
+                   lists:reverse(Top_Contents)} | Next_Contents]}
+                | Acc]);
+add_sections([Head | Tail], [{Level, Id, Contents} | Acc]) ->
+  add_sections(Tail, [{Level, Id, [Head | Contents]} | Acc]).
 
 % AST query
 
@@ -1080,8 +1236,8 @@ walk_ast(Node = {_, Contents}, State, Pre, Post) ->
   Post_State = walk_ast(Contents, Middle_State, Pre, Post),
   Post(Node, Post_State);
 walk_ast(Node = {Element, _, _}, State, Pre, Post)
-  when Element =:= code_block orelse Element =:= raw_inline
-    orelse Element =:= verbatim ->
+  when Element =:= code_block orelse Element =:= reference_definition 
+    orelse Element =:= raw_inline orelse Element =:= verbatim ->
   Middle_State = Pre(Node, State),
   Post(Node, Middle_State);
 walk_ast(Node = {_, _, Contents}, State, Pre, Post) ->
@@ -1121,8 +1277,9 @@ update_children({Element, Contents}, State, Pre, Post) ->
   {New_Contents, New_State} = update_nodes(Contents, [], State, Pre, Post),
   {{Element, New_Contents}, New_State};
 update_children(Node = {Element, _, _}, State, _, _)
-  when Element =:= code_block orelse Element =:= raw_inline
-    orelse Element =:= verbatim -> {Node, State};
+  when Element =:= code_block orelse Element =:= reference_definition 
+    orelse Element =:= raw_inline orelse Element =:= verbatim ->
+  {Node, State};
 update_children({Element, Attributes, Contents}, State, Pre, Post) ->
   {New_Contents, New_State} = update_nodes(Contents, [], State, Pre, Post),
   {{Element, Attributes, New_Contents}, New_State}.
