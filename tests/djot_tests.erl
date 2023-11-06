@@ -25,42 +25,116 @@
 
 indent(0, Acc) -> Acc;
 indent(Level, Acc) -> indent(Level - 1, "  " ++ Acc).
+indent(Level) when Level < 0 ->
+  "{invalid indent " ++ integer_to_list(Level);
 indent(Level) -> indent(Level, "").
 
-quote(Text) -> "\"" ++ Text ++ "\"".  % TODO: escapes
+quote([], Acc) -> lists:reverse([$" | Acc]);
+quote([$" | Tail], Acc) -> quote(Tail, [$", $\\ | Acc]);
+quote([Head | Tail], Acc) -> quote(Tail, [Head | Acc]).
+
+quote(Text) when is_atom(Text) -> quote(atom_to_list(Text), "\"");
+quote(Text) -> quote(Text, "\"").
 
 render_ast_attr(Attributes) -> render_ast_attr(lists:reverse(Attributes), "").
 render_ast_attr([], Acc) -> Acc;
+render_ast_attr([{Key, Value} | Tail], Acc) when is_atom(Key) ->
+  render_ast_attr([{atom_to_list(Key), Value} | Tail], Acc);
 render_ast_attr([{Key, Value} | Tail], Acc) ->
   render_ast_attr(Tail, " " ++ Key ++ "=" ++ quote(Value) ++ Acc).
 
-render_ast({Doc, _}) -> lists:reverse(render_ast(Doc, 0, [])).
+% render_ast({Doc, _}) -> lists:reverse(render_ast(Doc, 0, [])).
+%
+% render_ast([], _, Acc) -> Acc;
+% render_ast([Head | Tail], Depth, Acc) ->
+%   render_ast(Tail, Depth, render_ast(Head, Depth, Acc));
+% render_ast({Element}, Depth, Acc) ->
+%   [indent(Depth) ++ atom_to_list(Element) ++ "\n" | Acc];
+% render_ast({symbol, Text}, Depth, Acc) ->
+%   [indent(Depth) ++ "symb alias=" ++ quote(Text) ++ "\n" | Acc];
+% render_ast({text, Text}, Depth, Acc) ->
+%   [indent(Depth) ++ "str text=" ++ quote(Text) ++ "\n" | Acc];
+% render_ast({Element, Contents}, Depth, Acc) ->
+%   render_ast(Contents,
+%              Depth + 1,
+%              [indent(Depth) ++ atom_to_list(Element) ++ "\n" | Acc]);
+% render_ast({raw_inline, [{"format", Format}], Contents}, Depth, Acc) ->
+%   [indent(Depth) ++ "raw_inline text="
+%                  ++ quote(Contents)
+%                  ++ " format="
+%                  ++ quote(Format) ++ "\n"
+%    | Acc];
+% render_ast({Element, Attributes, Contents}, Depth, Acc) ->
+%   render_ast(Contents,
+%              Depth + 1,
+%              [indent(Depth) ++ atom_to_list(Element)
+%                             ++ render_ast_attr(Attributes) ++ "\n"
+%               | Acc]).
+render_ast({Doc, _}) ->
+  {Acc, _} = djot:walk_ast(Doc, {[], 0}, fun pre_ast/2, fun post_ast/2),
+  lists:reverse(Acc).
 
-render_ast([], _, Acc) -> Acc;
-render_ast([Head | Tail], Depth, Acc) ->
-  render_ast(Tail, Depth, render_ast(Head, Depth, Acc));
-render_ast({Element}, Depth, Acc) ->
-  [indent(Depth) ++ atom_to_list(Element) ++ "\n" | Acc];
-render_ast({symbol, Text}, Depth, Acc) ->
-  [indent(Depth) ++ "symb alias=" ++ quote(Text) ++ "\n" | Acc];
-render_ast({text, Text}, Depth, Acc) ->
-  [indent(Depth) ++ "str text=" ++ quote(Text) ++ "\n" | Acc];
-render_ast({Element, Contents}, Depth, Acc) ->
-  render_ast(Contents,
-             Depth + 1,
-             [indent(Depth) ++ atom_to_list(Element) ++ "\n" | Acc]);
-render_ast({raw_inline, [{"format", Format}], Contents}, Depth, Acc) ->
-  [indent(Depth) ++ "raw_inline text="
-                 ++ quote(Contents)
-                 ++ " format="
-                 ++ quote(Format) ++ "\n"
-   | Acc];
-render_ast({Element, Attributes, Contents}, Depth, Acc) ->
-  render_ast(Contents,
-             Depth + 1,
-             [indent(Depth) ++ atom_to_list(Element)
-                            ++ render_ast_attr(Attributes) ++ "\n"
-              | Acc]).
+pre_ast({cell, [{head, true} | Attributes = [{align, _} | _]], _},
+        {Acc, Depth}) ->
+  {[indent(Depth) ++ "cell head=true"
+                  ++ render_ast_attr(Attributes)
+                  ++ "\n"
+    | Acc],
+   Depth + 1};
+pre_ast({cell, [{head, true} | Attributes], _}, {Acc, Depth}) ->
+  {[indent(Depth) ++ "cell head=true align=\"default\""
+                  ++ render_ast_attr(Attributes)
+                  ++ "\n"
+    | Acc],
+   Depth + 1};
+pre_ast({cell, Attributes = [{align, _} | _], _}, {Acc, Depth}) ->
+  {[indent(Depth) ++ "cell head=false"
+                  ++ render_ast_attr(Attributes)
+                  ++ "\n"
+    | Acc],
+   Depth + 1};
+pre_ast({cell, Attributes, _}, {Acc, Depth}) ->
+  {[indent(Depth) ++ "cell head=false align=\"default\""
+                  ++ render_ast_attr(Attributes)
+                  ++ "\n"
+    | Acc],
+   Depth + 1};
+pre_ast({row, [{head, true} | Attributes], _}, {Acc, Depth}) ->
+  {[indent(Depth) ++ "row head=true"
+                  ++ render_ast_attr(Attributes)
+                  ++ "\n"
+    | Acc],
+   Depth + 1};
+pre_ast({row, Attributes, _}, {Acc, Depth}) ->
+  {[indent(Depth) ++ "row head=false"
+                  ++ render_ast_attr(Attributes)
+                  ++ "\n"
+    | Acc],
+   Depth + 1};
+pre_ast({symbol, Text}, {Acc, Depth}) ->
+  {[indent(Depth) ++ "symb alias=" ++ quote(Text) ++ "\n" | Acc], Depth + 1};
+pre_ast({table, [{align, _} | Attributes], _}, {Acc, Depth}) ->
+  {[indent(Depth) ++ "table"
+                  ++ render_ast_attr(Attributes)
+                  ++ "\n"
+    | Acc],
+   Depth + 1};
+pre_ast({text, Text}, {Acc, Depth}) ->
+  {[indent(Depth) ++ "str text=" ++ quote(Text) ++ "\n" | Acc], Depth + 1};
+pre_ast({Element}, {Acc, Depth}) ->
+  {[indent(Depth) ++ atom_to_list(Element) ++ "\n" | Acc],
+   Depth + 1};
+pre_ast({Element, _}, {Acc, Depth}) ->
+  {[indent(Depth) ++ atom_to_list(Element) ++ "\n" | Acc],
+   Depth + 1};
+pre_ast({Element, Attributes, _}, {Acc, Depth}) ->
+  {[indent(Depth) ++ atom_to_list(Element)
+                  ++ render_ast_attr(Attributes)
+                  ++ "\n"
+    | Acc],
+   Depth + 1}.
+post_ast(_, {Acc, Depth}) ->
+  {Acc, Depth - 1}.
 
 html_body_quote(Text) -> html_body_quote(lists:reverse(Text), []).
 html_body_quote([], Acc) -> Acc;
@@ -204,6 +278,8 @@ tag(block_quote) -> {"blockquote", "\n", "\n"};
 tag(caption) -> {"caption", "", "\n"};
 tag(cell) -> {"td", "", "\n"};
 tag(del) -> {"del", "", ""};
+tag(definition) -> {"dd", "\n", "\n"};
+tag(definition_list) -> {"dl", "\n", "\n"};
 tag(emphasis) -> {"em", "", ""};
 tag(fenced_div) -> {"div", "\n", "\n"};
 tag(link) -> {"a", "", ""};
@@ -217,6 +293,7 @@ tag(strong) -> {"strong", "", ""};
 tag(subscript) -> {"sub", "", ""};
 tag(superscript) -> {"sup", "", ""};
 tag(table) -> {"table", "\n", "\n"};
+tag(term) -> {"dt", "", "\n"};
 tag(thematic_break) -> {"hr", "\n", "\n"}.
 
 prepend(Text, {Context, Footnotes, Output}) ->
@@ -250,6 +327,7 @@ pre_html(_, State = {[img | _], _, _}) -> State;
 
 pre_html({para, _, _}, State = {[tight_li | _], _, _}) -> State;
 
+pre_html({definition_list_item, _, _}, State) -> State;
 pre_html({display_math, Text}, State) ->
   prepend(html_body_quote(Text), "<span class=\"math display\">\\[", State);
 pre_html({double_quoted, _}, State) ->
@@ -317,10 +395,21 @@ pre_html({list, [{marker, [_, Marker, _]} | Attributes], _}, State) ->
   html_open("ol", "\n",
             [{"start", ""}, {"type", [Marker]} | Attributes],
             State);
+pre_html({task_list, [{tight, _} | Attributes], _}, State) ->
+  html_open("ul", "\n",
+            [{"class", "task-list"} | Attributes],
+            State);
 pre_html({list_item, [{tight, true}], _}, State) ->
   prepend("<li>\n", push(tight_li, State));
 pre_html({list_item, [{tight, false}], _}, State) ->
   prepend("<li>\n", push(loose_li, State));
+pre_html({task_list_item,
+          [{tight, Tight}, {"checkbox", Class} | Attributes],
+          _},
+         State) ->
+  html_open("li", "\n",
+            [{"class", Class} | Attributes],
+            push(case Tight of true -> tight_li; false -> loose_li end, State));
 
 pre_html({doc, _, _}, State) -> State;
 pre_html({reference_definition, _, _}, State) -> State;
@@ -340,6 +429,7 @@ post_html(_, State = {[img | _], _, _}) -> State;
 post_html({para, _, _}, State = {[tight_li | _], _, _}) ->
   prepend("\n", State);
 
+post_html({definition_list_item, _, _}, State) -> State;
 post_html({display_math, _}, State) -> prepend("\\]</span>", State);
 post_html({double_quoted, _}, State) -> prepend("”", State);
 post_html({footnote_ref, _}, State) -> State;
@@ -370,6 +460,11 @@ post_html({list, [{marker, _} | _], _}, State) -> prepend("</ol>\n", State);
 post_html({list_item, [{tight, true}], _}, State) ->
   prepend("</li>\n", pop(tight_li, State));
 post_html({list_item, [{tight, false}], _}, State) ->
+  prepend("</li>\n", pop(loose_li, State));
+post_html({task_list, _, _}, State) -> prepend("</ul>\n", State);
+post_html({task_list_item, [{tight, true} | _], _}, State) ->
+  prepend("</li>\n", pop(tight_li, State));
+post_html({task_list_item, [{tight, false} | _], _}, State) ->
   prepend("</li>\n", pop(loose_li, State));
 post_html({thematic_break, _, _}, State) -> State;
 

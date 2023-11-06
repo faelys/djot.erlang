@@ -37,6 +37,9 @@
 -define(IS_BLOCK(Element), (Element =:= block_quote
                      orelse Element =:= caption
                      orelse Element =:= code_block
+                     orelse Element =:= definition
+                     orelse Element =:= definition_list
+                     orelse Element =:= definition_list_item
                      orelse Element =:= doc
                      orelse Element =:= fenced_div
                      orelse Element =:= footnote
@@ -47,9 +50,13 @@
                      orelse Element =:= para
                      orelse Element =:= reference
                      orelse Element =:= table
+                     orelse Element =:= term
                      orelse Element =:= thematic_break)).
 
 -define(CONTAINS_BLOCK(Element), (Element =:= block_quote
+                           orelse Element =:= definition
+                           orelse Element =:= definition_list
+                           orelse Element =:= definition_list_item
                            orelse Element =:= doc
                            orelse Element =:= fenced_div
                            orelse Element =:= footnote
@@ -59,7 +66,8 @@
 -define(CONTAINS_INLINE(Element), (Element =:= caption
                             orelse Element =:= cell
                             orelse Element =:= heading
-                            orelse Element =:= para)).
+                            orelse Element =:= para
+                            orelse Element =:= term)).
 
 -define(CONTAINS_TEXT(Element), (Element =:= code_block
                           orelse Element =:= display_math
@@ -348,6 +356,17 @@ smart_dashes(N) when N rem 2 == 0 -> en_dash(N div 2, []);
 smart_dashes(N) when N rem 3 == 2 -> em_dash(N div 3, en_dash(1, []));
 smart_dashes(N) when N rem 3 == 1 -> em_dash(N div 3 - 1, en_dash(2, [])).
 
+close_blocks(Input, Next,
+             [{Element, Attributes,
+               [{table, Table_Attributes, [{caption, _, _} | Rows]}
+                | Contents]}
+              | Block_Stack],
+             [Block = {caption, _, _}],
+             []) ->
+  parse(Input,
+        Next ++ [{Element, Attributes,
+                  [{table, Table_Attributes, [Block | Rows]} | Contents]}
+                 | Block_Stack]);
 close_blocks(Input, Next,
              [{Element, Attributes,
                [{table, Table_Attributes, Rows} | Contents]}
@@ -1705,13 +1724,31 @@ pre_resolve({Element, Attributes = [{"reference", Ref} | _], Contents}, State)
   resolve_link(Ref, Element, Attributes, Contents, State);
 pre_resolve(Node, State) -> {Node, State}.
 
+pre_list({list,
+          [{marker, ":"}, {start, _}, {tight, _} | Attributes],
+          Contents},
+         State) ->
+  {{definition_list, Attributes, Contents}, [definition_list | State]};
 pre_list(Node = {list, [{marker, _}, {start, _}, Attr = {tight, _} | _], _},
          State) ->
   {Node, [Attr | State]};
+pre_list({list_item, Attributes, [{para, Text} | Rest]},
+         State = [definition_list | _]) ->
+  {{definition_list_item, Attributes, [{term, Text}, {definition, Rest}]},
+   State};
+pre_list({list_item, Attributes, [{para, _, Text} | Rest]},
+         State = [definition_list | _]) ->
+  {{definition_list_item, Attributes, [{term, Text}, {definition, Rest}]},
+   State};
+pre_list({list_item, Attributes, Contents},
+         State = [definition_list | _]) ->
+  {{definition_list_item, Attributes, [{term, ""}, {definition, Contents}]},
+   State};
 pre_list({list_item, Attributes, Contents}, State = [Attr | _]) ->
   {{list_item, [Attr | Attributes], Contents}, State};
 pre_list(Node, State) -> {Node, State}.
 
+post_list(Node = {definition_list, _, _}, [_ | State]) -> {Node, State};
 post_list(Node = {list, _, _}, [_ | State]) -> {Node, State};
 post_list(Node, State) -> {Node, State}.
 
