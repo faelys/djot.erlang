@@ -118,6 +118,12 @@ last_word(Reverse_Prefix = [Head | _], Word)
   when ?SPACE(Head) -> {Reverse_Prefix, Word};
 last_word([Head | Tail], Word) -> last_word(Tail, [Head | Word]).
 
+list_item_mark([Marker, 32, $[, X, $], Space | Tail])
+  when ?SPACE(Space),
+       X =:= $x orelse X =:= 32,
+       Marker =:= $* orelse Marker =:= $+ orelse Marker =:= $- ->
+  Value = case X of 32 -> "unchecked"; $x -> "checked" end,
+  {[Marker] ++ " [ ]", 5, Value, Tail};
 list_item_mark([Marker, Space | Tail])
   when ?SPACE(Space),
        Marker =:= $* orelse Marker =:= $+
@@ -827,6 +833,21 @@ parse(Input,
          | Rest]}
        | Stack]) ->
   case list_item_match(Input, Old_Marker, Old_Start) of
+    {true, New_Marker = [_, 32, $[, 32, $]], _, Item_Level, Value, Tail} ->
+      New_Tight = case Tight of true  -> true;
+                                maybe -> false;
+                                false -> false end,
+      close_blocks(Tail,
+                   [{newblock, Level + Item_Level, []},
+                    {list_item,
+                     [{indent, Level}, {"checkbox", Value} | Attributes],
+                     []}],
+                   [{list, [{marker, New_Marker},
+                            {start, 0},
+                            {tight, New_Tight}
+                            | List_Attributes],
+                     List_Contents} | Stack],
+                   lists:reverse(Rest));
     {true, New_Marker, New_Start, Item_Level, _, Tail} ->
       New_Tight = case Tight of true  -> true;
                                 maybe -> false;
@@ -840,6 +861,16 @@ parse(Input,
                             | List_Attributes],
                      List_Contents} | Stack],
                    lists:reverse(Rest));
+    {false, New_Marker = [_, 32, $[, 32, $]], Item_Level, Value, Tail} ->
+      close_blocks(Tail,
+                   [{newblock, Level + Item_Level, []},
+                    {list_item, [{indent, Level}, {"checkbox", Value}], []},
+                    {list, [{marker, New_Marker},
+                            {start, 0},
+                            {tight, true}
+                            | Attributes], []}],
+                   Stack,
+                   lists:reverse(To_Match));
     {false, New_Marker, Item_Level, Value, Tail} ->
       close_blocks(Tail,
                    [{newblock, Level + Item_Level, []},
@@ -1156,6 +1187,12 @@ parse(Input, [{newblock, Level, Attributes} | Stack]) ->
     {thematic_break, Tail} ->
        parse(Tail, [{newline, []},
                     {thematic_break, Attributes, []}
+                    | Stack]);
+    {Marker = [_, 32, $[, 32, $]], Item_Level, Value, Tail} ->
+       parse(Tail, [{newblock, Level + Item_Level, []},
+                    {list_item, [{indent, Level}, {"checkbox", Value}], []},
+                    {list, [{marker, Marker}, {start, 0}, {tight, true}
+                            | Attributes], []}
                     | Stack]);
     {Marker, Item_Level, Value, Tail} ->
        parse(Tail, [{newblock, Level + Item_Level, []},
@@ -1729,6 +1766,12 @@ pre_list({list,
           Contents},
          State) ->
   {{definition_list, Attributes, Contents}, [definition_list | State]};
+pre_list({list,
+          [{marker, [_, 32, $[, 32, $]]}, {start, 0}
+           | Attributes = [Attr = {tight, _} | _]],
+          Contents},
+         State) ->
+  {{task_list, Attributes, Contents}, [task_list, Attr | State]};
 pre_list(Node = {list, [{marker, _}, {start, _}, Attr = {tight, _} | _], _},
          State) ->
   {Node, [Attr | State]};
@@ -1744,11 +1787,15 @@ pre_list({list_item, Attributes, Contents},
          State = [definition_list | _]) ->
   {{definition_list_item, Attributes, [{term, ""}, {definition, Contents}]},
    State};
+pre_list({list_item, Attributes, Contents},
+         State = [task_list, Attr | _]) ->
+  {{task_list_item, [Attr | Attributes], Contents}, State};
 pre_list({list_item, Attributes, Contents}, State = [Attr | _]) ->
   {{list_item, [Attr | Attributes], Contents}, State};
 pre_list(Node, State) -> {Node, State}.
 
 post_list(Node = {definition_list, _, _}, [_ | State]) -> {Node, State};
+post_list(Node = {task_list, _, _}, [_, _ | State]) -> {Node, State};
 post_list(Node = {list, _, _}, [_ | State]) -> {Node, State};
 post_list(Node, State) -> {Node, State}.
 
